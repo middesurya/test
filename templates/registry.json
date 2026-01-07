@@ -1,0 +1,22 @@
+{
+  "templates": [
+    {
+      "name": "basic",
+      "description": "Basic MCP server with one example tool",
+      "languages": ["typescript", "python"],
+      "features": ["Example tool", "Logging", "Test harness", "Documentation"]
+    },
+    {
+      "name": "discord-bot",
+      "description": "MCP server with Discord bot integration",
+      "languages": ["typescript", "python"],
+      "features": ["Discord.js/discord.py", "Event handlers", "Slash commands", "Logging"]
+    },
+    {
+      "name": "api-wrapper",
+      "description": "MCP server that wraps an external API",
+      "languages": ["typescript", "python"],
+      "features": ["HTTP client", "Rate limiting", "Caching", "Error handling"]
+    }
+  ]
+}
