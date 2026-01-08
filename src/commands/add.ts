@@ -8,6 +8,19 @@ interface AddToolOptions {
   inputs?: string;
 }
 
+/**
+ * Safely parse JSON with error handling
+ * Prevents DoS/crashes from malformed JSON input
+ */
+function safeJsonParse<T = object>(jsonString: string, context: string): T {
+  try {
+    return JSON.parse(jsonString) as T;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    throw new Error(`Invalid JSON in ${context}: ${message}`);
+  }
+}
+
 export const addCommand = new Command('add')
   .description('Add components to an existing MCP server project');
 
@@ -22,7 +35,7 @@ addCommand
     let toolConfig = {
       name: toolName,
       description: options.description || '',
-      inputs: options.inputs ? JSON.parse(options.inputs) : null
+      inputs: options.inputs ? safeJsonParse(options.inputs, '--inputs option') : null
     };
 
     if (!options.description) {
@@ -50,7 +63,7 @@ addCommand
       toolConfig = {
         name: toolName,
         description: answers.description,
-        inputs: JSON.parse(answers.inputs)
+        inputs: safeJsonParse(answers.inputs, 'input schema editor')
       };
     }
 

@@ -1,0 +1,64 @@
+{
+  "projectName": "mcp-gen",
+  "description": "MCP Server Boilerplate Generator CLI - Create production-ready MCP servers with 2025 spec compliance",
+  "version": "0.1.0",
+  "mcpSpec": {
+    "version": "2025-03-26",
+    "transport": ["stdio", "streamable-http"],
+    "features": ["tools", "resources", "prompts"]
+  },
+  "codeStyle": {
+    "language": "typescript",
+    "formatter": "prettier",
+    "linter": "eslint",
+    "strictMode": true
+  },
+  "conventions": {
+    "toolNaming": "kebab-case",
+    "fileNaming": "kebab-case",
+    "componentNaming": "PascalCase",
+    "testSuffix": ".test.ts"
+  },
+  "securityDefaults": {
+    "requireAuth": true,
+    "authType": "oauth-pkce",
+    "inputValidation": true,
+    "rateLimiting": true,
+    "auditLogging": true
+  },
+  "performanceTargets": {
+    "throughput": 1000,
+    "p95LatencyMs": 100,
+    "p99LatencyMs": 500,
+    "availabilityPercent": 99.9
+  },
+  "templates": {
+    "available": [
+      "basic",
+      "streamable-http",
+      "discord-bot",
+      "api-wrapper",
+      "multi-agent",
+      "enterprise"
+    ],
+    "default": "basic"
+  },
+  "skills": {
+    "priority": ["scaffold", "security-audit"],
+    "all": ["scaffold", "tool-gen", "testing", "deploy", "security-audit", "docs-gen"]
+  },
+  "agents": {
+    "explore": {
+      "skills": ["security-audit"]
+    },
+    "plan": {
+      "skills": ["scaffold", "tool-gen", "deploy"]
+    },
+    "review": {
+      "skills": ["security-audit", "testing"]
+    },
+    "test": {
+      "skills": ["testing"]
+    }
+  }
+}
