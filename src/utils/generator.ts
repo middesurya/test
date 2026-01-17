@@ -49,6 +49,9 @@ export async function generateProject(projectPath: string, config: ProjectConfig
   if (config.includeDocker) {
     await generateDockerFiles(projectPath, config);
   }
+
+  // Generate CI/CD workflows
+  await generateCICD(projectPath, config);
 }
 
 async function generateMCPSpec(projectPath: string, config: ProjectConfig): Promise<void> {
@@ -126,4 +129,205 @@ services:
 
   await fs.writeFile(path.join(projectPath, 'Dockerfile'), dockerfile, 'utf-8');
   await fs.writeFile(path.join(projectPath, 'docker-compose.yml'), dockerCompose, 'utf-8');
+}
+
+async function generateCICD(projectPath: string, config: ProjectConfig): Promise<void> {
+  const workflowsDir = path.join(projectPath, '.github', 'workflows');
+  await fs.mkdir(workflowsDir, { recursive: true });
+
+  if (config.language === 'typescript') {
+    // TypeScript CI workflow
+    const ciWorkflow = `name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js \${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: \${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint --if-present
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  type-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+`;
+
+    await fs.writeFile(path.join(workflowsDir, 'ci.yml'), ciWorkflow, 'utf-8');
+
+    // Release workflow
+    const releaseWorkflow = `name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: \${{ secrets.NPM_TOKEN }}
+`;
+
+    await fs.writeFile(path.join(workflowsDir, 'release.yml'), releaseWorkflow, 'utf-8');
+
+  } else {
+    // Python CI workflow
+    const ciWorkflow = `name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python \${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: \${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run linter
+        run: |
+          pip install flake8
+          flake8 src tests --max-line-length=120
+
+      - name: Run tests
+        run: pytest
+
+  type-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install mypy
+
+      - name: Type check
+        run: mypy src --ignore-missing-imports
+`;
+
+    await fs.writeFile(path.join(workflowsDir, 'ci.yml'), ciWorkflow, 'utf-8');
+
+    // Release workflow for Python
+    const releaseWorkflow = `name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: \${{ secrets.PYPI_TOKEN }}
+        run: twine upload dist/*
+`;
+
+    await fs.writeFile(path.join(workflowsDir, 'release.yml'), releaseWorkflow, 'utf-8');
+  }
 }

@@ -1,19 +1,21 @@
 import path from 'path';
 import fs from 'fs/promises';
+import { discordBotTemplates } from '../templates/discord-bot';
+import { apiWrapperTemplates } from '../templates/api-wrapper';
 
-interface TemplateFile {
+export interface TemplateFile {
   path: string;
   content: string;
 }
 
-interface Template {
+export interface Template {
   name: string;
   description: string;
   features: string[];
   files: TemplateFile[];
 }
 
-interface TemplateInfo {
+export interface TemplateInfo {
   name: string;
   description: string;
   features: string[];
@@ -23,6 +25,8 @@ const TEMPLATES_DIR = path.join(__dirname, '../../templates');
 
 // Built-in templates
 const builtInTemplates: Record<string, Record<string, Template>> = {
+  'discord-bot': discordBotTemplates,
+  'api-wrapper': apiWrapperTemplates,
   basic: {
     typescript: {
       name: 'basic',

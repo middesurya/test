@@ -1,11 +1,54 @@
 import { Command } from 'commander';
 import inquirer from 'inquirer';
 import ora from 'ora';
+import chalk from 'chalk';
 import { addTool } from '../utils/tool-generator';
+import { validateToolName } from '../utils/validation';
+import fs from 'fs/promises';
+import path from 'path';
 
 interface AddToolOptions {
   description?: string;
   inputs?: string;
+}
+
+/**
+ * Safely parse JSON with helpful error messages
+ */
+function safeParseJSON(jsonString: string, context: string): object | null {
+  try {
+    return JSON.parse(jsonString);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      console.error(chalk.red(`\n❌ Invalid JSON in ${context}:`));
+      console.error(chalk.yellow(`   ${error.message}`));
+      console.error(chalk.dim('\n   Tip: Use a JSON validator to check your schema'));
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Detect if we're in a valid MCP project
+ */
+async function isValidProject(projectPath: string): Promise<{ valid: boolean; language: 'typescript' | 'python' | null }> {
+  try {
+    await fs.access(path.join(projectPath, 'package.json'));
+    return { valid: true, language: 'typescript' };
+  } catch {
+    try {
+      await fs.access(path.join(projectPath, 'requirements.txt'));
+      return { valid: true, language: 'python' };
+    } catch {
+      try {
+        await fs.access(path.join(projectPath, 'pyproject.toml'));
+        return { valid: true, language: 'python' };
+      } catch {
+        return { valid: false, language: null };
+      }
+    }
+  }
 }
 
 export const addCommand = new Command('add')
@@ -17,14 +60,41 @@ addCommand
   .option('-d, --description <desc>', 'Tool description')
   .option('-i, --inputs <schema>', 'Input schema (JSON)')
   .action(async (toolName: string, options: AddToolOptions) => {
-    console.log('\n🔧 Adding new tool:', toolName, '\n');
+    console.log(chalk.cyan('\n🔧 Adding new tool:'), chalk.bold(toolName), '\n');
+
+    // Validate tool name
+    const nameValidation = validateToolName(toolName);
+    if (!nameValidation.valid) {
+      console.error(chalk.red(`❌ Invalid tool name: ${nameValidation.error}`));
+      console.error(chalk.dim('   Tool names must start with a letter and contain only lowercase letters, numbers, and hyphens'));
+      process.exit(1);
+    }
+
+    // Pre-flight check: are we in a valid project?
+    const projectCheck = await isValidProject(process.cwd());
+    if (!projectCheck.valid) {
+      console.error(chalk.red('❌ Not in an MCP project directory'));
+      console.error(chalk.dim('   Run this command from your project root (where package.json or requirements.txt exists)'));
+      console.error(chalk.dim('   Or create a new project first: mcp-gen create my-project'));
+      process.exit(1);
+    }
+
+    // Parse inputs from CLI option (with error handling)
+    let parsedInputs: object | null = null;
+    if (options.inputs) {
+      parsedInputs = safeParseJSON(options.inputs, 'inputs option');
+      if (parsedInputs === null) {
+        process.exit(1);
+      }
+    }
 
     let toolConfig = {
       name: toolName,
       description: options.description || '',
-      inputs: options.inputs ? JSON.parse(options.inputs) : null
+      inputs: parsedInputs
     };
 
+    // Interactive mode if description not provided
     if (!options.description) {
       const answers = await inquirer.prompt([
         {
@@ -47,10 +117,16 @@ addCommand
         }
       ]);
 
+      // Parse schema from editor (with error handling)
+      const schemaInputs = safeParseJSON(answers.inputs, 'input schema');
+      if (schemaInputs === null) {
+        process.exit(1);
+      }
+
       toolConfig = {
         name: toolName,
         description: answers.description,
-        inputs: JSON.parse(answers.inputs)
+        inputs: schemaInputs
       };
     }
 
@@ -58,15 +134,28 @@ addCommand
 
     try {
       await addTool(process.cwd(), toolConfig);
-      spinner.succeed(`Tool '${toolName}' added successfully!`);
+      spinner.succeed(chalk.green(`Tool '${toolName}' added successfully!`));
 
-      console.log('\n📁 Files created:');
-      console.log(`   src/tools/${toolName}.ts`);
-      console.log(`   tests/tools/${toolName}.test.ts`);
-      console.log('\n✨ Don\'t forget to implement your tool logic!\n');
+      // Show appropriate file paths based on language
+      const fileExt = projectCheck.language === 'python' ? '.py' : '.ts';
+      const snakeName = toolName.replace(/-/g, '_');
+      const fileName = projectCheck.language === 'python' ? snakeName : toolName;
+
+      console.log(chalk.cyan('\n📁 Files created:'));
+      console.log(chalk.dim(`   src/tools/${fileName}${fileExt}`));
+      if (projectCheck.language === 'python') {
+        console.log(chalk.dim(`   tests/test_${snakeName}.py`));
+      } else {
+        console.log(chalk.dim(`   tests/tools/${toolName}.test.ts`));
+      }
+
+      console.log(chalk.yellow('\n✨ Don\'t forget to implement your tool logic!'));
+      console.log(chalk.dim(`   Open src/tools/${fileName}${fileExt} to get started\n`));
     } catch (error) {
-      spinner.fail('Failed to add tool');
-      console.error(error);
+      spinner.fail(chalk.red('Failed to add tool'));
+      if (error instanceof Error) {
+        console.error(chalk.red(`   ${error.message}`));
+      }
       process.exit(1);
     }
   });
