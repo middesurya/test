@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "api/mcp.ts": {
+      "runtime": "@vercel/node@3"
+    }
+  },
+  "routes": [
+    { "src": "/mcp", "dest": "/api/mcp" },
+    { "src": "/.well-known/mcp-configuration", "dest": "/api/well-known" },
+    { "src": "/health", "dest": "/api/health" }
+  ]
+}

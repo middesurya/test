@@ -1,0 +1,53 @@
+{
+  "name": "enterprise-mcp-server",
+  "version": "1.0.0",
+  "description": "An MCP server built with mcp-gen",
+  "tools": [
+    {
+      "name": "example-tool",
+      "description": "An example tool to get you started",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "description": "The input to process"
+          }
+        },
+        "required": ["input"]
+      }
+    },
+    {
+      "name": "fetch-user",
+      "description": "Fetch user profile by ID with optional email and profile data",
+      "requiredScopes": ["users:read"],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The unique identifier of the user to fetch",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "includeEmail": {
+            "type": "boolean",
+            "description": "Include user email (requires users:read:email scope)",
+            "default": false
+          },
+          "includeProfile": {
+            "type": "boolean",
+            "description": "Include extended profile information",
+            "default": true
+          }
+        },
+        "required": ["userId"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": [
+    "users:read",
+    "users:read:email"
+  ]
+}

@@ -3,6 +3,8 @@ import { Command } from 'commander';
 import { createCommand } from './commands/create';
 import { addCommand } from './commands/add';
 import { templatesCommand } from './commands/templates';
+import { deployCommand } from './commands/deploy';
+import { docsCommand } from './commands/docs';
 
 const program = new Command();
 
@@ -14,5 +16,7 @@ program
 program.addCommand(createCommand);
 program.addCommand(addCommand);
 program.addCommand(templatesCommand);
+program.addCommand(deployCommand);
+program.addCommand(docsCommand);
 
 program.parse();

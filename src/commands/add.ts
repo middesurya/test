@@ -13,41 +13,15 @@ interface AddToolOptions {
 }
 
 /**
- * Safely parse JSON with helpful error messages
+ * Safely parse JSON with error handling
+ * Prevents DoS/crashes from malformed JSON input
  */
-function safeParseJSON(jsonString: string, context: string): object | null {
+function safeJsonParse<T = object>(jsonString: string, context: string): T {
   try {
-    return JSON.parse(jsonString);
+    return JSON.parse(jsonString) as T;
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      console.error(chalk.red(`\n❌ Invalid JSON in ${context}:`));
-      console.error(chalk.yellow(`   ${error.message}`));
-      console.error(chalk.dim('\n   Tip: Use a JSON validator to check your schema'));
-      return null;
-    }
-    throw error;
-  }
-}
-
-/**
- * Detect if we're in a valid MCP project
- */
-async function isValidProject(projectPath: string): Promise<{ valid: boolean; language: 'typescript' | 'python' | null }> {
-  try {
-    await fs.access(path.join(projectPath, 'package.json'));
-    return { valid: true, language: 'typescript' };
-  } catch {
-    try {
-      await fs.access(path.join(projectPath, 'requirements.txt'));
-      return { valid: true, language: 'python' };
-    } catch {
-      try {
-        await fs.access(path.join(projectPath, 'pyproject.toml'));
-        return { valid: true, language: 'python' };
-      } catch {
-        return { valid: false, language: null };
-      }
-    }
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    throw new Error(`Invalid JSON in ${context}: ${message}`);
   }
 }
 
@@ -91,7 +65,7 @@ addCommand
     let toolConfig = {
       name: toolName,
       description: options.description || '',
-      inputs: parsedInputs
+      inputs: options.inputs ? safeJsonParse(options.inputs, '--inputs option') : null
     };
 
     // Interactive mode if description not provided
@@ -126,7 +100,7 @@ addCommand
       toolConfig = {
         name: toolName,
         description: answers.description,
-        inputs: schemaInputs
+        inputs: safeJsonParse(answers.inputs, 'input schema editor')
       };
     }
 
