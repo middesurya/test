@@ -1,0 +1,10 @@
+{
+  "mcp_version": "2025-03-26",
+  "server_name": "sample-mcp-server",
+  "capabilities": ["tools"],
+  "transport": ["streamable-http"],
+  "endpoints": {
+    "mcp": "/mcp",
+    "health": "/health"
+  }
+}
