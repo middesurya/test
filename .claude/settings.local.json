@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git clone:*)",
+      "WebSearch",
+      "Bash(dir:*)",
+      "Bash(tree /F:*)",
+      "Bash(powershell:*)",
+      "WebFetch(domain:modelcontextprotocol.info)",
+      "WebFetch(domain:mikhail.io)",
+      "Bash(npm install:*)",
+      "Bash(npm run build:*)",
+      "Bash(node dist/cli.js:*)",
+      "Bash(npm test)",
+      "Bash(npm i:*)",
+      "Bash(npm run test:coverage:*)",
+      "Bash(curl:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
