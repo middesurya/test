@@ -1,0 +1,359 @@
+/**
+ * Circuit Breaker Pattern Implementation
+ * Prevents cascading failures with automatic recovery
+ */
+
+import { IncomingMessage, ServerResponse } from 'http';
+
+/**
+ * Circuit breaker states
+ */
+export enum CircuitState {
+  CLOSED = 'CLOSED',       // Normal operation
+  OPEN = 'OPEN',           // Failing, rejecting requests
+  HALF_OPEN = 'HALF_OPEN', // Testing if service recovered
+}
+
+/**
+ * Circuit breaker configuration
+ */
+export interface CircuitBreakerConfig {
+  /** Number of failures before opening circuit */
+  failureThreshold: number;
+  /** Time in ms before attempting recovery */
+  resetTimeout: number;
+  /** Number of successful calls to close circuit */
+  successThreshold?: number;
+  /** Time window for counting failures (ms) */
+  failureWindow?: number;
+  /** Health check function for half-open state */
+  healthCheck?: () => Promise<boolean>;
+  /** Callback when state changes */
+  onStateChange?: (from: CircuitState, to: CircuitState) => void;
+}
+
+/**
+ * Circuit breaker result
+ */
+export interface CircuitBreakerResult<T> {
+  success: boolean;
+  result?: T;
+  error?: Error;
+  state: CircuitState;
+}
+
+/**
+ * Failure record
+ */
+interface FailureRecord {
+  timestamp: number;
+  error: Error;
+}
+
+/**
+ * Circuit Breaker
+ */
+export class CircuitBreaker {
+  private state: CircuitState = CircuitState.CLOSED;
+  private failures: FailureRecord[] = [];
+  private successCount: number = 0;
+  private lastFailure: number = 0;
+  private resetTimer?: NodeJS.Timeout;
+  private config: Required<CircuitBreakerConfig>;
+
+  constructor(config: CircuitBreakerConfig) {
+    this.config = {
+      failureThreshold: config.failureThreshold,
+      resetTimeout: config.resetTimeout,
+      successThreshold: config.successThreshold ?? 1,
+      failureWindow: config.failureWindow ?? 60000,
+      healthCheck: config.healthCheck ?? (async () => true),
+      onStateChange: config.onStateChange ?? (() => {}),
+    };
+  }
+
+  /**
+   * Get current state
+   */
+  getState(): CircuitState {
+    return this.state;
+  }
+
+  /**
+   * Check if circuit is allowing requests
+   */
+  isAllowed(): boolean {
+    this.cleanOldFailures();
+
+    if (this.state === CircuitState.CLOSED) {
+      return true;
+    }
+
+    if (this.state === CircuitState.OPEN) {
+      // Check if reset timeout has passed
+      if (Date.now() - this.lastFailure >= this.config.resetTimeout) {
+        this.transitionTo(CircuitState.HALF_OPEN);
+        return true;
+      }
+      return false;
+    }
+
+    // Half-open: allow one request through
+    return true;
+  }
+
+  /**
+   * Execute a function with circuit breaker protection
+   */
+  async execute<T>(fn: () => Promise<T>): Promise<CircuitBreakerResult<T>> {
+    if (!this.isAllowed()) {
+      return {
+        success: false,
+        error: new Error('Circuit breaker is open'),
+        state: this.state,
+      };
+    }
+
+    try {
+      const result = await fn();
+      this.onSuccess();
+      return {
+        success: true,
+        result,
+        state: this.state,
+      };
+    } catch (error) {
+      this.onFailure(error as Error);
+      return {
+        success: false,
+        error: error as Error,
+        state: this.state,
+      };
+    }
+  }
+
+  /**
+   * Record a successful operation
+   */
+  onSuccess(): void {
+    if (this.state === CircuitState.HALF_OPEN) {
+      this.successCount++;
+      if (this.successCount >= this.config.successThreshold) {
+        this.transitionTo(CircuitState.CLOSED);
+        this.reset();
+      }
+    } else if (this.state === CircuitState.CLOSED) {
+      // Clear old failures on success
+      this.cleanOldFailures();
+    }
+  }
+
+  /**
+   * Record a failed operation
+   */
+  onFailure(error: Error): void {
+    this.lastFailure = Date.now();
+    this.failures.push({ timestamp: this.lastFailure, error });
+    this.cleanOldFailures();
+
+    if (this.state === CircuitState.HALF_OPEN) {
+      // Immediate trip on failure in half-open state
+      this.transitionTo(CircuitState.OPEN);
+      this.successCount = 0;
+      this.scheduleReset();
+    } else if (this.state === CircuitState.CLOSED) {
+      // Check if we've hit the threshold
+      if (this.failures.length >= this.config.failureThreshold) {
+        this.transitionTo(CircuitState.OPEN);
+        this.scheduleReset();
+      }
+    }
+  }
+
+  /**
+   * Force circuit to open state
+   */
+  trip(): void {
+    this.transitionTo(CircuitState.OPEN);
+    this.lastFailure = Date.now();
+    this.scheduleReset();
+  }
+
+  /**
+   * Force circuit to closed state
+   */
+  reset(): void {
+    this.failures = [];
+    this.successCount = 0;
+    if (this.resetTimer) {
+      clearTimeout(this.resetTimer);
+      this.resetTimer = undefined;
+    }
+    if (this.state !== CircuitState.CLOSED) {
+      this.transitionTo(CircuitState.CLOSED);
+    }
+  }
+
+  /**
+   * Get circuit breaker stats
+   */
+  getStats(): {
+    state: CircuitState;
+    failures: number;
+    lastFailure: number | null;
+    timeUntilReset: number | null;
+  } {
+    this.cleanOldFailures();
+    return {
+      state: this.state,
+      failures: this.failures.length,
+      lastFailure: this.lastFailure || null,
+      timeUntilReset: this.state === CircuitState.OPEN
+        ? Math.max(0, this.config.resetTimeout - (Date.now() - this.lastFailure))
+        : null,
+    };
+  }
+
+  /**
+   * Clean old failures outside the window
+   */
+  private cleanOldFailures(): void {
+    const cutoff = Date.now() - this.config.failureWindow;
+    this.failures = this.failures.filter(f => f.timestamp > cutoff);
+  }
+
+  /**
+   * Schedule transition to half-open state
+   */
+  private scheduleReset(): void {
+    if (this.resetTimer) {
+      clearTimeout(this.resetTimer);
+    }
+
+    this.resetTimer = setTimeout(async () => {
+      if (this.state === CircuitState.OPEN) {
+        // Run health check if provided
+        try {
+          const healthy = await this.config.healthCheck();
+          if (healthy) {
+            this.transitionTo(CircuitState.HALF_OPEN);
+          } else {
+            // Stay open and reschedule
+            this.scheduleReset();
+          }
+        } catch {
+          // Health check failed, stay open
+          this.scheduleReset();
+        }
+      }
+    }, this.config.resetTimeout);
+  }
+
+  /**
+   * Transition to a new state
+   */
+  private transitionTo(newState: CircuitState): void {
+    const oldState = this.state;
+    this.state = newState;
+    this.config.onStateChange(oldState, newState);
+  }
+}
+
+/**
+ * Circuit breaker registry for managing multiple breakers
+ */
+export class CircuitBreakerRegistry {
+  private breakers: Map<string, CircuitBreaker> = new Map();
+  private defaultConfig: CircuitBreakerConfig;
+
+  constructor(defaultConfig?: Partial<CircuitBreakerConfig>) {
+    this.defaultConfig = {
+      failureThreshold: 5,
+      resetTimeout: 30000,
+      successThreshold: 2,
+      failureWindow: 60000,
+      ...defaultConfig,
+    };
+  }
+
+  /**
+   * Get or create a circuit breaker
+   */
+  getBreaker(name: string, config?: Partial<CircuitBreakerConfig>): CircuitBreaker {
+    let breaker = this.breakers.get(name);
+    if (!breaker) {
+      breaker = new CircuitBreaker({ ...this.defaultConfig, ...config });
+      this.breakers.set(name, breaker);
+    }
+    return breaker;
+  }
+
+  /**
+   * Execute with a named circuit breaker
+   */
+  async execute<T>(name: string, fn: () => Promise<T>): Promise<CircuitBreakerResult<T>> {
+    return this.getBreaker(name).execute(fn);
+  }
+
+  /**
+   * Get all breaker stats
+   */
+  getAllStats(): Record<string, ReturnType<CircuitBreaker['getStats']>> {
+    const stats: Record<string, ReturnType<CircuitBreaker['getStats']>> = {};
+    for (const [name, breaker] of this.breakers) {
+      stats[name] = breaker.getStats();
+    }
+    return stats;
+  }
+
+  /**
+   * Reset all breakers
+   */
+  resetAll(): void {
+    for (const breaker of this.breakers.values()) {
+      breaker.reset();
+    }
+  }
+}
+
+/**
+ * Create HTTP middleware with circuit breaker
+ */
+export function createCircuitBreakerMiddleware(breaker: CircuitBreaker) {
+  return (req: IncomingMessage, res: ServerResponse, next: () => void): void => {
+    if (!breaker.isAllowed()) {
+      const stats = breaker.getStats();
+      res.writeHead(503, {
+        'Content-Type': 'application/json',
+        'Retry-After': Math.ceil((stats.timeUntilReset || 30000) / 1000),
+      });
+      res.end(JSON.stringify({
+        error: 'service_unavailable',
+        error_description: 'Circuit breaker is open',
+        retry_after: Math.ceil((stats.timeUntilReset || 30000) / 1000),
+      }));
+      return;
+    }
+    next();
+  };
+}
+
+/**
+ * Create circuit breaker for MCP tool with auto-wrapping
+ */
+export function createToolCircuitBreaker(config?: Partial<CircuitBreakerConfig>): CircuitBreaker {
+  return new CircuitBreaker({
+    failureThreshold: 3,
+    resetTimeout: 10000,
+    successThreshold: 1,
+    failureWindow: 30000,
+    ...config,
+  });
+}
+
+// Export default configurations
+export const DEFAULT_CIRCUIT_CONFIGS: Record<string, Partial<CircuitBreakerConfig>> = {
+  aggressive: { failureThreshold: 2, resetTimeout: 5000, successThreshold: 1 },
+  standard: { failureThreshold: 5, resetTimeout: 30000, successThreshold: 2 },
+  relaxed: { failureThreshold: 10, resetTimeout: 60000, successThreshold: 3 },
+};

@@ -1,0 +1,267 @@
+/**
+ * Token Bucket Rate Limiter
+ * Implements per-tenant rate limiting with backpressure handling
+ */
+
+import { IncomingMessage, ServerResponse } from 'http';
+
+/**
+ * Rate limiter configuration
+ */
+export interface RateLimiterConfig {
+  /** Maximum tokens in bucket */
+  maxTokens: number;
+  /** Tokens added per second */
+  refillRate: number;
+  /** Initial tokens (defaults to maxTokens) */
+  initialTokens?: number;
+  /** Key extractor function (e.g., tenant ID from request) */
+  keyExtractor?: (req: IncomingMessage) => string;
+  /** Custom response on rate limit */
+  onRateLimited?: (req: IncomingMessage, res: ServerResponse, retryAfter: number) => void;
+}
+
+/**
+ * Bucket state
+ */
+interface Bucket {
+  tokens: number;
+  lastRefill: number;
+}
+
+/**
+ * Rate limiter result
+ */
+export interface RateLimitResult {
+  allowed: boolean;
+  remaining: number;
+  resetAt: number;
+  retryAfter?: number;
+}
+
+/**
+ * Token Bucket Rate Limiter
+ */
+export class RateLimiter {
+  private buckets: Map<string, Bucket> = new Map();
+  private config: Required<RateLimiterConfig>;
+
+  constructor(config: RateLimiterConfig) {
+    this.config = {
+      maxTokens: config.maxTokens,
+      refillRate: config.refillRate,
+      initialTokens: config.initialTokens ?? config.maxTokens,
+      keyExtractor: config.keyExtractor ?? (() => 'default'),
+      onRateLimited: config.onRateLimited ?? this.defaultRateLimitedHandler,
+    };
+  }
+
+  /**
+   * Try to consume a token for the given key
+   */
+  consume(key: string, tokens: number = 1): RateLimitResult {
+    const now = Date.now();
+    let bucket = this.buckets.get(key);
+
+    if (!bucket) {
+      bucket = {
+        tokens: this.config.initialTokens,
+        lastRefill: now,
+      };
+      this.buckets.set(key, bucket);
+    }
+
+    // Refill tokens based on time elapsed
+    const elapsed = (now - bucket.lastRefill) / 1000;
+    const tokensToAdd = elapsed * this.config.refillRate;
+    bucket.tokens = Math.min(this.config.maxTokens, bucket.tokens + tokensToAdd);
+    bucket.lastRefill = now;
+
+    // Check if we can consume
+    if (bucket.tokens >= tokens) {
+      bucket.tokens -= tokens;
+      return {
+        allowed: true,
+        remaining: Math.floor(bucket.tokens),
+        resetAt: now + ((this.config.maxTokens - bucket.tokens) / this.config.refillRate) * 1000,
+      };
+    }
+
+    // Calculate retry-after
+    const tokensNeeded = tokens - bucket.tokens;
+    const retryAfter = Math.ceil(tokensNeeded / this.config.refillRate);
+
+    return {
+      allowed: false,
+      remaining: 0,
+      resetAt: now + retryAfter * 1000,
+      retryAfter,
+    };
+  }
+
+  /**
+   * Get current bucket state without consuming
+   */
+  peek(key: string): { tokens: number; maxTokens: number } {
+    const bucket = this.buckets.get(key);
+    if (!bucket) {
+      return { tokens: this.config.initialTokens, maxTokens: this.config.maxTokens };
+    }
+
+    // Calculate current tokens with refill
+    const now = Date.now();
+    const elapsed = (now - bucket.lastRefill) / 1000;
+    const currentTokens = Math.min(
+      this.config.maxTokens,
+      bucket.tokens + elapsed * this.config.refillRate
+    );
+
+    return { tokens: Math.floor(currentTokens), maxTokens: this.config.maxTokens };
+  }
+
+  /**
+   * Reset bucket for a key
+   */
+  reset(key: string): void {
+    this.buckets.delete(key);
+  }
+
+  /**
+   * Clear all buckets
+   */
+  clear(): void {
+    this.buckets.clear();
+  }
+
+  /**
+   * Create HTTP middleware
+   */
+  middleware() {
+    return (req: IncomingMessage, res: ServerResponse, next: () => void): void => {
+      const key = this.config.keyExtractor(req);
+      const result = this.consume(key);
+
+      // Set rate limit headers
+      res.setHeader('X-RateLimit-Limit', this.config.maxTokens);
+      res.setHeader('X-RateLimit-Remaining', result.remaining);
+      res.setHeader('X-RateLimit-Reset', Math.floor(result.resetAt / 1000));
+
+      if (!result.allowed) {
+        res.setHeader('Retry-After', result.retryAfter!);
+        this.config.onRateLimited(req, res, result.retryAfter!);
+        return;
+      }
+
+      next();
+    };
+  }
+
+  /**
+   * Default rate limited response handler
+   */
+  private defaultRateLimitedHandler = (
+    _req: IncomingMessage,
+    res: ServerResponse,
+    retryAfter: number
+  ): void => {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: 'rate_limit_exceeded',
+      error_description: 'Too many requests',
+      retry_after: retryAfter,
+    }));
+  };
+}
+
+/**
+ * Per-tenant rate limiter with different limits per tier
+ */
+export interface TenantTier {
+  maxTokens: number;
+  refillRate: number;
+}
+
+export class TenantRateLimiter {
+  private limiters: Map<string, RateLimiter> = new Map();
+  private tierConfig: Record<string, TenantTier>;
+  private defaultTier: TenantTier;
+  private tenantTierResolver: (tenantId: string) => string;
+
+  constructor(
+    tierConfig: Record<string, TenantTier>,
+    defaultTier: TenantTier,
+    tenantTierResolver: (tenantId: string) => string
+  ) {
+    this.tierConfig = tierConfig;
+    this.defaultTier = defaultTier;
+    this.tenantTierResolver = tenantTierResolver;
+  }
+
+  /**
+   * Get or create rate limiter for tenant
+   */
+  private getLimiter(tenantId: string): RateLimiter {
+    let limiter = this.limiters.get(tenantId);
+    if (!limiter) {
+      const tierName = this.tenantTierResolver(tenantId);
+      const tier = this.tierConfig[tierName] || this.defaultTier;
+      limiter = new RateLimiter(tier);
+      this.limiters.set(tenantId, limiter);
+    }
+    return limiter;
+  }
+
+  /**
+   * Consume tokens for tenant
+   */
+  consume(tenantId: string, tokens: number = 1): RateLimitResult {
+    return this.getLimiter(tenantId).consume('default', tokens);
+  }
+
+  /**
+   * Create middleware with tenant extraction
+   */
+  middleware(tenantExtractor: (req: IncomingMessage) => string) {
+    return (req: IncomingMessage, res: ServerResponse, next: () => void): void => {
+      const tenantId = tenantExtractor(req);
+      const result = this.consume(tenantId);
+
+      res.setHeader('X-RateLimit-Remaining', result.remaining);
+      res.setHeader('X-RateLimit-Reset', Math.floor(result.resetAt / 1000));
+
+      if (!result.allowed) {
+        res.setHeader('Retry-After', result.retryAfter!);
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'rate_limit_exceeded',
+          tenant: tenantId,
+          retry_after: result.retryAfter,
+        }));
+        return;
+      }
+
+      next();
+    };
+  }
+}
+
+/**
+ * Create rate limiter for MCP tools
+ */
+export function createToolRateLimiter(config: {
+  requestsPerMinute: number;
+  burstSize?: number;
+}): RateLimiter {
+  return new RateLimiter({
+    maxTokens: config.burstSize || config.requestsPerMinute,
+    refillRate: config.requestsPerMinute / 60,
+  });
+}
+
+// Export default tier configurations
+export const DEFAULT_TIERS: Record<string, TenantTier> = {
+  free: { maxTokens: 10, refillRate: 1 },      // 10 burst, 60/min
+  basic: { maxTokens: 50, refillRate: 5 },     // 50 burst, 300/min
+  pro: { maxTokens: 200, refillRate: 20 },     // 200 burst, 1200/min
+  enterprise: { maxTokens: 1000, refillRate: 100 }, // 1000 burst, 6000/min
+};

@@ -1,0 +1,304 @@
+/**
+ * MCP Request Router
+ * Routes requests to appropriate backend MCP servers
+ */
+
+import { promises as fs } from 'fs';
+
+/**
+ * Server configuration
+ */
+export interface ServerConfig {
+  name: string;
+  url: string;
+  healthEndpoint?: string;
+  weight?: number;
+  enabled?: boolean;
+  tools?: string[];
+  timeout?: number;
+}
+
+/**
+ * Gateway configuration
+ */
+export interface GatewayConfig {
+  servers: ServerConfig[];
+  defaultTimeout?: number;
+  loadBalancing?: 'round-robin' | 'weighted' | 'least-connections';
+}
+
+/**
+ * Routing context
+ */
+export interface RoutingContext {
+  tenantId?: string;
+  headers?: Record<string, string>;
+}
+
+/**
+ * Server health status
+ */
+interface ServerHealth {
+  name: string;
+  url: string;
+  healthy: boolean;
+  lastCheck: number;
+  responseTime?: number;
+}
+
+/**
+ * MCP Router - Routes requests to backend MCP servers
+ */
+export class MCPRouter {
+  private config: GatewayConfig | null = null;
+  private configPath: string;
+  private serverHealth: Map<string, ServerHealth> = new Map();
+  private roundRobinIndex: number = 0;
+  private connectionCounts: Map<string, number> = new Map();
+
+  constructor(configPath: string) {
+    this.configPath = configPath;
+    this.loadConfig();
+    this.startHealthChecks();
+  }
+
+  /**
+   * Load configuration from file
+   */
+  private async loadConfig(): Promise<void> {
+    try {
+      const content = await fs.readFile(this.configPath, 'utf-8');
+      this.config = JSON.parse(content) as GatewayConfig;
+    } catch (error) {
+      console.error('Failed to load gateway config:', error);
+      this.config = { servers: [] };
+    }
+  }
+
+  /**
+   * Start background health checks
+   */
+  private startHealthChecks(): void {
+    setInterval(() => this.checkAllServersHealth(), 30000);
+    // Initial health check
+    this.checkAllServersHealth();
+  }
+
+  /**
+   * Check health of all servers
+   */
+  private async checkAllServersHealth(): Promise<void> {
+    if (!this.config) return;
+
+    for (const server of this.config.servers) {
+      if (!server.enabled) continue;
+
+      const healthUrl = server.healthEndpoint || `${server.url}/health`;
+      const startTime = Date.now();
+
+      try {
+        const response = await fetch(healthUrl, {
+          method: 'GET',
+          signal: AbortSignal.timeout(5000),
+        });
+
+        this.serverHealth.set(server.name, {
+          name: server.name,
+          url: server.url,
+          healthy: response.ok,
+          lastCheck: Date.now(),
+          responseTime: Date.now() - startTime,
+        });
+      } catch {
+        this.serverHealth.set(server.name, {
+          name: server.name,
+          url: server.url,
+          healthy: false,
+          lastCheck: Date.now(),
+        });
+      }
+    }
+  }
+
+  /**
+   * Route a request to an appropriate server
+   */
+  async route(
+    path: string,
+    body: unknown,
+    context: RoutingContext
+  ): Promise<unknown> {
+    if (!this.config || this.config.servers.length === 0) {
+      throw new Error('No servers configured');
+    }
+
+    // Find server for this path/tool
+    const server = this.selectServer(path, body);
+    if (!server) {
+      throw new Error('No available server for this request');
+    }
+
+    // Track connection
+    const currentConnections = this.connectionCounts.get(server.name) || 0;
+    this.connectionCounts.set(server.name, currentConnections + 1);
+
+    try {
+      const response = await fetch(`${server.url}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': context.headers?.['x-forwarded-for'] || '',
+          'X-Tenant-ID': context.tenantId || '',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(server.timeout || this.config.defaultTimeout || 30000),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status}`);
+      }
+
+      return await response.json();
+    } finally {
+      // Release connection
+      const connections = this.connectionCounts.get(server.name) || 1;
+      this.connectionCounts.set(server.name, Math.max(0, connections - 1));
+    }
+  }
+
+  /**
+   * Select server based on load balancing strategy
+   */
+  private selectServer(path: string, body: unknown): ServerConfig | null {
+    if (!this.config) return null;
+
+    // Get healthy, enabled servers
+    const availableServers = this.config.servers.filter(s => {
+      if (!s.enabled) return false;
+      const health = this.serverHealth.get(s.name);
+      return !health || health.healthy;
+    });
+
+    if (availableServers.length === 0) return null;
+
+    // Check if request is for a specific tool
+    const toolName = this.extractToolName(body);
+    if (toolName) {
+      const toolServer = availableServers.find(s =>
+        s.tools?.includes(toolName)
+      );
+      if (toolServer) return toolServer;
+    }
+
+    // Apply load balancing
+    switch (this.config.loadBalancing) {
+      case 'weighted':
+        return this.selectWeighted(availableServers);
+      case 'least-connections':
+        return this.selectLeastConnections(availableServers);
+      case 'round-robin':
+      default:
+        return this.selectRoundRobin(availableServers);
+    }
+  }
+
+  /**
+   * Round-robin server selection
+   */
+  private selectRoundRobin(servers: ServerConfig[]): ServerConfig {
+    const server = servers[this.roundRobinIndex % servers.length];
+    this.roundRobinIndex++;
+    return server;
+  }
+
+  /**
+   * Weighted server selection
+   */
+  private selectWeighted(servers: ServerConfig[]): ServerConfig {
+    const totalWeight = servers.reduce((sum, s) => sum + (s.weight || 1), 0);
+    let random = Math.random() * totalWeight;
+
+    for (const server of servers) {
+      random -= server.weight || 1;
+      if (random <= 0) return server;
+    }
+
+    return servers[0];
+  }
+
+  /**
+   * Least connections server selection
+   */
+  private selectLeastConnections(servers: ServerConfig[]): ServerConfig {
+    let minConnections = Infinity;
+    let selected = servers[0];
+
+    for (const server of servers) {
+      const connections = this.connectionCounts.get(server.name) || 0;
+      if (connections < minConnections) {
+        minConnections = connections;
+        selected = server;
+      }
+    }
+
+    return selected;
+  }
+
+  /**
+   * Extract tool name from MCP request
+   */
+  private extractToolName(body: unknown): string | null {
+    if (!body || typeof body !== 'object') return null;
+    const request = body as { method?: string; params?: { name?: string } };
+    if (request.method === 'tools/call' && request.params?.name) {
+      return request.params.name;
+    }
+    return null;
+  }
+
+  /**
+   * Get server status for monitoring
+   */
+  getServerStatus(): Record<string, unknown>[] {
+    return Array.from(this.serverHealth.values()).map(health => ({
+      name: health.name,
+      url: health.url,
+      healthy: health.healthy,
+      responseTime: health.responseTime,
+      connections: this.connectionCounts.get(health.name) || 0,
+      lastCheck: new Date(health.lastCheck).toISOString(),
+    }));
+  }
+
+  /**
+   * Health check for gateway itself
+   */
+  async healthCheck(): Promise<{ healthy: boolean; servers: number; healthyServers: number }> {
+    const servers = this.serverHealth.size;
+    const healthyServers = Array.from(this.serverHealth.values()).filter(s => s.healthy).length;
+
+    return {
+      healthy: healthyServers > 0,
+      servers,
+      healthyServers,
+    };
+  }
+
+  /**
+   * Graceful shutdown
+   */
+  async shutdown(): Promise<void> {
+    // Wait for active connections to complete
+    const maxWait = 30000;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWait) {
+      const totalConnections = Array.from(this.connectionCounts.values())
+        .reduce((sum, count) => sum + count, 0);
+
+      if (totalConnections === 0) break;
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+}

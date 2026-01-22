@@ -1,0 +1,11 @@
+toolName,query
+example-tool,test query 1
+example-tool,test query 2
+example-tool,test query with special chars: @#$%
+example-tool,longer test query that contains more text to process
+example-tool,unicode test: 你好世界
+example-tool,empty-like query
+example-tool,query with numbers 12345
+example-tool,UPPERCASE QUERY
+example-tool,mixed Case Query
+example-tool,query-with-dashes

@@ -1,0 +1,157 @@
+/**
+ * {{projectName}} - Observable MCP Server
+ * With full OpenTelemetry observability stack
+ *
+ * IMPORTANT: Tracer must be imported first!
+ */
+
+// Import tracer FIRST - critical for OTel instrumentation
+import { tracer, withToolSpan, addSpanEvent } from './telemetry/tracer';
+import {
+  withToolMetrics,
+  getMetrics,
+  getMetricsContentType,
+  toolInvocationsTotal,
+} from './telemetry/metrics';
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
+import http from 'http';
+
+// Server configuration
+const SERVER_NAME = '{{projectName}}';
+const SERVER_VERSION = '{{version}}';
+
+// Create MCP server
+const server = new Server(
+  {
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
+  }
+);
+
+// ===========================================
+// Tool Definitions
+// ===========================================
+
+interface ExampleToolInput {
+  message: string;
+}
+
+// Register tools handler
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: 'example_tool',
+      description: 'An example tool with observability',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          message: {
+            type: 'string',
+            description: 'The message to process',
+            maxLength: 1000,
+          },
+        },
+        required: ['message'],
+        additionalProperties: false,
+      },
+    },
+  ],
+}));
+
+// Handle tool calls with tracing and metrics
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+  // Wrap tool execution with both tracing and metrics
+  return withToolSpan(name, async (span) => {
+    return withToolMetrics(name, async () => {
+      span.setAttribute('mcp.tool.input_size', JSON.stringify(args).length);
+      addSpanEvent('tool_execution_started', { tool: name });
+
+      switch (name) {
+        case 'example_tool': {
+          const input = args as ExampleToolInput;
+
+          // Simulate some processing
+          addSpanEvent('processing_message', { length: String(input.message.length) });
+
+          const result = {
+            processed: true,
+            originalMessage: input.message,
+            timestamp: new Date().toISOString(),
+          };
+
+          addSpanEvent('tool_execution_completed');
+          span.setAttribute('mcp.tool.output_size', JSON.stringify(result).length);
+
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        default:
+          throw new Error(`Unknown tool: ${name}`);
+      }
+    });
+  });
+});
+
+// ===========================================
+// Metrics HTTP Server
+// ===========================================
+
+const METRICS_PORT = parseInt(process.env.METRICS_PORT || '9090', 10);
+
+const metricsServer = http.createServer(async (req, res) => {
+  if (req.url === '/metrics' && req.method === 'GET') {
+    res.setHeader('Content-Type', getMetricsContentType());
+    res.end(await getMetrics());
+  } else if (req.url === '/health' || req.url === '/ready') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ status: 'ok', service: SERVER_NAME }));
+  } else {
+    res.statusCode = 404;
+    res.end('Not Found');
+  }
+});
+
+// ===========================================
+// Startup
+// ===========================================
+
+async function main() {
+  console.error(`Starting ${SERVER_NAME} v${SERVER_VERSION}`);
+  console.error('OpenTelemetry tracing enabled');
+  console.error(`OTLP endpoint: ${process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://localhost:4318'}`);
+
+  // Start metrics server
+  metricsServer.listen(METRICS_PORT, () => {
+    console.error(`Metrics available at http://localhost:${METRICS_PORT}/metrics`);
+  });
+
+  // Start MCP server on stdio
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error('MCP server connected via stdio');
+}
+
+main().catch((error) => {
+  console.error('Fatal error:', error);
+  process.exit(1);
+});

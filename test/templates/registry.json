@@ -1,0 +1,115 @@
+{
+  "version": "2025-03-26",
+  "templates": [
+    {
+      "name": "basic",
+      "description": "Basic MCP server with one example tool",
+      "languages": ["typescript", "python"],
+      "features": ["Example tool", "Logging", "Test harness", "Documentation"],
+      "transport": ["stdio"],
+      "auth": false,
+      "recommended": false
+    },
+    {
+      "name": "streamable-http",
+      "description": "Serverless-compatible MCP server with Streamable HTTP transport (2025 spec)",
+      "languages": ["typescript", "python"],
+      "features": [
+        "Streamable HTTP transport",
+        "AWS Lambda/Vercel/Cloud Run ready",
+        "Stateless design",
+        "CORS configured",
+        "Health endpoints",
+        "/.well-known discovery"
+      ],
+      "transport": ["streamable-http"],
+      "auth": false,
+      "recommended": true
+    },
+    {
+      "name": "discord-bot",
+      "description": "MCP server with Discord bot integration",
+      "languages": ["typescript", "python"],
+      "features": ["Discord.js/discord.py", "Event handlers", "Slash commands", "Logging"],
+      "transport": ["stdio"],
+      "auth": false,
+      "recommended": false
+    },
+    {
+      "name": "api-wrapper",
+      "description": "MCP server that wraps an external API",
+      "languages": ["typescript", "python"],
+      "features": ["HTTP client", "Rate limiting", "Caching", "Error handling"],
+      "transport": ["stdio", "streamable-http"],
+      "auth": false,
+      "recommended": false
+    },
+    {
+      "name": "multi-agent",
+      "description": "MCP server with orchestrator/worker pattern for complex multi-agent workflows",
+      "languages": ["typescript", "python"],
+      "features": [
+        "Orchestrator agent",
+        "Worker agents",
+        "Message queue integration",
+        "Shared state management",
+        "Task distribution",
+        "Agent coordination patterns"
+      ],
+      "transport": ["stdio", "streamable-http"],
+      "auth": false,
+      "recommended": false
+    },
+    {
+      "name": "enterprise",
+      "description": "Production-ready MCP server with full security suite and observability",
+      "languages": ["typescript", "python"],
+      "features": [
+        "OAuth 2.0 PKCE authentication",
+        "Capability-based access control",
+        "Audit logging",
+        "Prometheus metrics",
+        "Structured logging (JSON)",
+        "Rate limiting",
+        "Input validation",
+        "/.well-known discovery",
+        "Health/readiness probes",
+        "Docker + Kubernetes configs"
+      ],
+      "transport": ["stdio", "streamable-http"],
+      "auth": {
+        "type": "oauth-pkce",
+        "required": true,
+        "features": ["PKCE flow", "Token rotation", "Resource indicators"]
+      },
+      "recommended": true,
+      "securityLevel": "high"
+    }
+  ],
+  "categories": {
+    "beginner": ["basic"],
+    "serverless": ["streamable-http", "api-wrapper"],
+    "integration": ["discord-bot", "api-wrapper"],
+    "advanced": ["multi-agent", "enterprise"],
+    "production": ["enterprise", "streamable-http"]
+  },
+  "defaults": {
+    "language": "typescript",
+    "template": "basic",
+    "transport": "stdio"
+  },
+  "mcpSpec": {
+    "version": "2025-03-26",
+    "transports": {
+      "stdio": {
+        "description": "Standard input/output transport for local execution",
+        "serverless": false
+      },
+      "streamable-http": {
+        "description": "HTTP transport with streaming support (2025 spec)",
+        "serverless": true,
+        "spec": "https://modelcontextprotocol.io/specification/2025-03-26"
+      }
+    }
+  }
+}
