@@ -1,0 +1,148 @@
+/**
+ * Prometheus Metrics Configuration
+ * Exposes metrics endpoint at /metrics
+ */
+
+import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
+
+// Create a new registry
+export const metricsRegistry = new Registry();
+
+// Add default metrics (CPU, memory, event loop, etc.)
+collectDefaultMetrics({ register: metricsRegistry });
+
+// ===========================================
+// MCP-Specific Metrics
+// ===========================================
+
+/**
+ * Total number of MCP tool invocations
+ */
+export const toolInvocationsTotal = new Counter({
+  name: 'mcp_tool_invocations_total',
+  help: 'Total number of MCP tool invocations',
+  labelNames: ['tool_name', 'status'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * Duration of tool executions in seconds
+ */
+export const toolDurationSeconds = new Histogram({
+  name: 'mcp_tool_duration_seconds',
+  help: 'Duration of MCP tool executions in seconds',
+  labelNames: ['tool_name'] as const,
+  buckets: [0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10],
+  registers: [metricsRegistry],
+});
+
+/**
+ * Number of active tool executions
+ */
+export const activeToolExecutions = new Gauge({
+  name: 'mcp_active_tool_executions',
+  help: 'Number of currently executing MCP tools',
+  labelNames: ['tool_name'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * Total number of MCP resources accessed
+ */
+export const resourceAccessTotal = new Counter({
+  name: 'mcp_resource_access_total',
+  help: 'Total number of MCP resource accesses',
+  labelNames: ['resource_uri', 'status'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * Total number of MCP prompts invoked
+ */
+export const promptInvocationsTotal = new Counter({
+  name: 'mcp_prompt_invocations_total',
+  help: 'Total number of MCP prompt invocations',
+  labelNames: ['prompt_name'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * MCP server information gauge
+ */
+export const serverInfo = new Gauge({
+  name: 'mcp_server_info',
+  help: 'MCP server information',
+  labelNames: ['name', 'version', 'transport'] as const,
+  registers: [metricsRegistry],
+});
+
+// Set server info on startup
+serverInfo.set({ name: '{{projectName}}', version: '{{version}}', transport: 'stdio' }, 1);
+
+/**
+ * Total errors by type
+ */
+export const errorsTotal = new Counter({
+  name: 'mcp_errors_total',
+  help: 'Total number of MCP errors',
+  labelNames: ['error_type', 'tool_name'] as const,
+  registers: [metricsRegistry],
+});
+
+// ===========================================
+// Helper Functions
+// ===========================================
+
+/**
+ * Record tool invocation with timing
+ */
+export function recordToolInvocation(
+  toolName: string,
+  durationSeconds: number,
+  success: boolean
+): void {
+  toolInvocationsTotal.inc({ tool_name: toolName, status: success ? 'success' : 'error' });
+  toolDurationSeconds.observe({ tool_name: toolName }, durationSeconds);
+}
+
+/**
+ * Wrapper for tracking tool execution with metrics
+ */
+export async function withToolMetrics<T>(
+  toolName: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const startTime = process.hrtime.bigint();
+  activeToolExecutions.inc({ tool_name: toolName });
+
+  try {
+    const result = await fn();
+    const durationSeconds = Number(process.hrtime.bigint() - startTime) / 1e9;
+    recordToolInvocation(toolName, durationSeconds, true);
+    return result;
+  } catch (error) {
+    const durationSeconds = Number(process.hrtime.bigint() - startTime) / 1e9;
+    recordToolInvocation(toolName, durationSeconds, false);
+    errorsTotal.inc({
+      error_type: error instanceof Error ? error.name : 'UnknownError',
+      tool_name: toolName,
+    });
+    throw error;
+  } finally {
+    activeToolExecutions.dec({ tool_name: toolName });
+  }
+}
+
+/**
+ * Get metrics in Prometheus format
+ */
+export async function getMetrics(): Promise<string> {
+  return metricsRegistry.metrics();
+}
+
+/**
+ * Get content type for metrics response
+ */
+export function getMetricsContentType(): string {
+  return metricsRegistry.contentType;
+}

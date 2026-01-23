@@ -1,0 +1,132 @@
+# Artillery Load Test Configuration for MCP Servers
+# MCP Performance Targets: >1000 req/s, P95 <100ms, Error Rate <0.1%
+
+config:
+  target: "{{ $processEnvironment.TARGET_URL || 'http://localhost:3000' }}"
+  phases:
+    # Warm-up phase
+    - name: "Warm-up"
+      duration: 30
+      arrivalRate: 10
+      rampTo: 50
+
+    # Sustained load phase
+    - name: "Sustained load"
+      duration: 120
+      arrivalRate: 100
+
+    # Spike test
+    - name: "Spike"
+      duration: 30
+      arrivalRate: 200
+
+    # Cool down
+    - name: "Cool-down"
+      duration: 30
+      arrivalRate: 50
+      rampTo: 10
+
+  # Performance thresholds (will fail test if exceeded)
+  ensure:
+    p95: 100        # P95 latency must be under 100ms
+    p99: 500        # P99 latency must be under 500ms
+    maxErrorRate: 1 # Error rate must be under 1%
+
+  plugins:
+    expect: {}
+
+  defaults:
+    headers:
+      Content-Type: "application/json"
+      Accept: "application/json"
+
+  payload:
+    path: "./test-data.csv"
+    fields:
+      - "toolName"
+      - "query"
+    order: sequence
+    skipHeader: true
+
+scenarios:
+  # Health check scenario (light)
+  - name: "Health Check"
+    weight: 1
+    flow:
+      - get:
+          url: "/health"
+          expect:
+            - statusCode: 200
+
+  # Tool listing scenario
+  - name: "List Tools"
+    weight: 2
+    flow:
+      - post:
+          url: "/mcp"
+          json:
+            jsonrpc: "2.0"
+            method: "tools/list"
+            id: "{{ $randomString() }}"
+          expect:
+            - statusCode: 200
+            - hasProperty: "tools"
+
+  # Tool execution scenario (main load)
+  - name: "Execute Tool"
+    weight: 7
+    flow:
+      - post:
+          url: "/mcp"
+          json:
+            jsonrpc: "2.0"
+            method: "tools/call"
+            params:
+              name: "{{ toolName }}"
+              arguments:
+                query: "{{ query }}"
+            id: "{{ $randomString() }}"
+          expect:
+            - statusCode: 200
+          capture:
+            - json: "$.result"
+              as: "toolResult"
+
+  # Initialize + list + call sequence
+  - name: "Full Session"
+    weight: 3
+    flow:
+      - post:
+          url: "/mcp"
+          json:
+            jsonrpc: "2.0"
+            method: "initialize"
+            id: "init-{{ $randomString() }}"
+          expect:
+            - statusCode: 200
+      - think: 1
+      - post:
+          url: "/mcp"
+          json:
+            jsonrpc: "2.0"
+            method: "tools/list"
+            id: "list-{{ $randomString() }}"
+          expect:
+            - statusCode: 200
+      - think: 2
+      - post:
+          url: "/mcp"
+          json:
+            jsonrpc: "2.0"
+            method: "tools/call"
+            params:
+              name: "example-tool"
+              arguments:
+                query: "load test query"
+            id: "call-{{ $randomString() }}"
+          expect:
+            - statusCode: 200
+
+# Reporting
+after:
+  - log: "Load test complete"

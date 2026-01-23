@@ -1,0 +1,273 @@
+/**
+ * OAuth 2.0 Resource Server Implementation
+ * Implements RFC 9728 (Protected Resource Metadata) and RFC 8707 (Resource Indicators)
+ * Compliant with June 2025 MCP Specification
+ */
+
+import { IncomingMessage, ServerResponse } from 'http';
+import crypto from 'crypto';
+
+/**
+ * Protected Resource Metadata per RFC 9728
+ * Endpoint: /.well-known/oauth-protected-resource
+ */
+export interface ProtectedResourceMetadata {
+  resource: string;
+  authorization_servers: string[];
+  bearer_methods_supported?: ('header' | 'body' | 'query')[];
+  resource_documentation?: string;
+  resource_signing_alg_values_supported?: string[];
+  resource_encryption_alg_values_supported?: string[];
+  resource_encryption_enc_values_supported?: string[];
+}
+
+/**
+ * OAuth Token Claims
+ */
+export interface TokenClaims {
+  iss: string;  // Issuer
+  sub: string;  // Subject (user ID)
+  aud: string | string[];  // Audience (resource indicator)
+  exp: number;  // Expiration time
+  iat: number;  // Issued at
+  scope?: string;  // Space-separated scopes
+  client_id?: string;  // Client identifier
+  jti?: string;  // JWT ID for replay protection
+}
+
+/**
+ * Resource Server Configuration
+ */
+export interface ResourceServerConfig {
+  /** The resource identifier URL (RFC 8707) */
+  resourceUrl: string;
+  /** List of trusted authorization servers */
+  authorizationServers: string[];
+  /** Required scopes for access */
+  requiredScopes?: string[];
+  /** Token audience validation mode */
+  audienceValidation?: 'strict' | 'permissive';
+  /** Bearer token extraction methods */
+  bearerMethods?: ('header' | 'body' | 'query')[];
+  /** Clock skew tolerance in seconds */
+  clockSkewSeconds?: number;
+}
+
+/**
+ * Token validation result
+ */
+export interface TokenValidationResult {
+  valid: boolean;
+  claims?: TokenClaims;
+  error?: string;
+}
+
+/**
+ * Create Protected Resource Metadata endpoint handler
+ * Implements RFC 9728 Section 3
+ */
+export function createProtectedResourceMetadata(config: ResourceServerConfig): ProtectedResourceMetadata {
+  return {
+    resource: config.resourceUrl,
+    authorization_servers: config.authorizationServers,
+    bearer_methods_supported: config.bearerMethods || ['header'],
+    resource_documentation: `${config.resourceUrl}/docs`
+  };
+}
+
+/**
+ * Handler for /.well-known/oauth-protected-resource endpoint
+ */
+export function wellKnownProtectedResourceHandler(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  config: ResourceServerConfig
+): void {
+  const metadata = createProtectedResourceMetadata(config);
+
+  res.writeHead(200, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'max-age=3600',
+    'Access-Control-Allow-Origin': '*'
+  });
+  res.end(JSON.stringify(metadata, null, 2));
+}
+
+/**
+ * Extract bearer token from request
+ * Supports header, body, and query string per RFC 6750
+ */
+export function extractBearerToken(
+  req: IncomingMessage,
+  body?: Record<string, string>,
+  allowedMethods: ('header' | 'body' | 'query')[] = ['header']
+): string | null {
+  // Header method (preferred)
+  if (allowedMethods.includes('header')) {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+      return authHeader.slice(7);
+    }
+  }
+
+  // Body method (POST only)
+  if (allowedMethods.includes('body') && body?.access_token) {
+    return body.access_token;
+  }
+
+  // Query method (least secure)
+  if (allowedMethods.includes('query')) {
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+    const token = url.searchParams.get('access_token');
+    if (token) {
+      return token;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Validate JWT token structure (without cryptographic verification)
+ * In production, use proper JWT library for signature verification
+ */
+export function decodeJwt(token: string): TokenClaims | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      return null;
+    }
+
+    const payload = Buffer.from(parts[1], 'base64url').toString('utf-8');
+    return JSON.parse(payload) as TokenClaims;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Validate token claims
+ */
+export function validateTokenClaims(
+  claims: TokenClaims,
+  config: ResourceServerConfig
+): TokenValidationResult {
+  const now = Math.floor(Date.now() / 1000);
+  const clockSkew = config.clockSkewSeconds || 30;
+
+  // Check expiration
+  if (claims.exp < now - clockSkew) {
+    return { valid: false, error: 'Token expired' };
+  }
+
+  // Check issued at (not in the future)
+  if (claims.iat > now + clockSkew) {
+    return { valid: false, error: 'Token issued in the future' };
+  }
+
+  // Check issuer is a trusted authorization server
+  if (!config.authorizationServers.includes(claims.iss)) {
+    return { valid: false, error: 'Untrusted issuer' };
+  }
+
+  // Check audience (RFC 8707 Resource Indicators)
+  const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  const audienceValid = config.audienceValidation === 'permissive'
+    ? audiences.some(aud => aud === config.resourceUrl || config.resourceUrl.startsWith(aud))
+    : audiences.includes(config.resourceUrl);
+
+  if (!audienceValid) {
+    return { valid: false, error: 'Invalid audience' };
+  }
+
+  // Check required scopes
+  if (config.requiredScopes && config.requiredScopes.length > 0) {
+    const tokenScopes = claims.scope?.split(' ') || [];
+    const hasAllScopes = config.requiredScopes.every(scope => tokenScopes.includes(scope));
+    if (!hasAllScopes) {
+      return { valid: false, error: 'Insufficient scope' };
+    }
+  }
+
+  return { valid: true, claims };
+}
+
+/**
+ * Full token validation pipeline
+ */
+export function validateToken(
+  token: string,
+  config: ResourceServerConfig
+): TokenValidationResult {
+  // Decode JWT
+  const claims = decodeJwt(token);
+  if (!claims) {
+    return { valid: false, error: 'Invalid token format' };
+  }
+
+  // Validate claims
+  return validateTokenClaims(claims, config);
+}
+
+/**
+ * Create resource server authentication middleware
+ */
+export function createResourceServerMiddleware(config: ResourceServerConfig) {
+  return async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    next: () => void
+  ): Promise<void> => {
+    // Handle well-known endpoint
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+    if (url.pathname === '/.well-known/oauth-protected-resource') {
+      return wellKnownProtectedResourceHandler(req, res, config);
+    }
+
+    // Extract token
+    const token = extractBearerToken(req, undefined, config.bearerMethods);
+    if (!token) {
+      res.writeHead(401, {
+        'WWW-Authenticate': `Bearer realm="${config.resourceUrl}"`,
+        'Content-Type': 'application/json'
+      });
+      res.end(JSON.stringify({ error: 'unauthorized', error_description: 'Bearer token required' }));
+      return;
+    }
+
+    // Validate token
+    const result = validateToken(token, config);
+    if (!result.valid) {
+      res.writeHead(401, {
+        'WWW-Authenticate': `Bearer realm="${config.resourceUrl}", error="invalid_token", error_description="${result.error}"`,
+        'Content-Type': 'application/json'
+      });
+      res.end(JSON.stringify({ error: 'invalid_token', error_description: result.error }));
+      return;
+    }
+
+    // Attach claims to request for downstream handlers
+    (req as any).tokenClaims = result.claims;
+    next();
+  };
+}
+
+/**
+ * Generate a cryptographically secure state parameter for OAuth flows
+ */
+export function generateState(): string {
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+/**
+ * Generate PKCE code verifier and challenge
+ */
+export function generatePkce(): { verifier: string; challenge: string } {
+  const verifier = crypto.randomBytes(32).toString('base64url');
+  const challenge = crypto
+    .createHash('sha256')
+    .update(verifier)
+    .digest('base64url');
+
+  return { verifier, challenge };
+}

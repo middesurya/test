@@ -1,0 +1,148 @@
+/**
+ * {{projectName}} - MCP Gateway
+ * Enterprise multi-server routing and management
+ */
+
+import http from 'http';
+import { MCPRouter } from './router';
+import { GatewayAuth } from './auth/gateway-auth';
+import { RateLimiter } from './middleware/rate-limiter';
+import { QuotaManager } from './middleware/quota';
+
+// Configuration
+const PORT = parseInt(process.env.PORT || '3000', 10);
+const CONFIG_PATH = process.env.GATEWAY_CONFIG || './config/servers.json';
+
+// Initialize components
+const router = new MCPRouter(CONFIG_PATH);
+const auth = new GatewayAuth({
+  jwtSecret: process.env.JWT_SECRET || 'change-me-in-production',
+  apiKeyHeader: 'X-API-Key',
+});
+const rateLimiter = new RateLimiter({
+  maxTokens: 100,
+  refillRate: 10,
+  keyExtractor: (req) => req.headers['x-tenant-id'] as string || 'default',
+});
+const quotaManager = new QuotaManager({
+  defaultQuota: { daily: 10000, monthly: 100000 },
+});
+
+// Create HTTP server
+const server = http.createServer(async (req, res) => {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Tenant-ID');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // Health check
+  if (req.url === '/health' || req.url === '/ready') {
+    const status = await router.healthCheck();
+    res.writeHead(status.healthy ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(status));
+    return;
+  }
+
+  // Gateway status
+  if (req.url === '/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      gateway: '{{projectName}}',
+      version: '{{version}}',
+      servers: router.getServerStatus(),
+      uptime: process.uptime(),
+    }));
+    return;
+  }
+
+  // Parse request body for POST requests
+  let body = '';
+  if (req.method === 'POST') {
+    await new Promise<void>((resolve) => {
+      req.on('data', (chunk) => body += chunk);
+      req.on('end', resolve);
+    });
+  }
+
+  // Authentication
+  const authResult = await auth.authenticate(req);
+  if (!authResult.authenticated) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'unauthorized', message: authResult.error }));
+    return;
+  }
+
+  const tenantId = authResult.tenantId || 'default';
+
+  // Rate limiting
+  const rateLimitResult = rateLimiter.consume(tenantId);
+  res.setHeader('X-RateLimit-Remaining', rateLimitResult.remaining);
+  res.setHeader('X-RateLimit-Reset', Math.floor(rateLimitResult.resetAt / 1000));
+
+  if (!rateLimitResult.allowed) {
+    res.setHeader('Retry-After', rateLimitResult.retryAfter!);
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: 'rate_limit_exceeded',
+      retry_after: rateLimitResult.retryAfter,
+    }));
+    return;
+  }
+
+  // Quota check
+  const quotaResult = await quotaManager.checkQuota(tenantId);
+  if (!quotaResult.allowed) {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: 'quota_exceeded',
+      quota_type: quotaResult.quotaType,
+      reset_at: quotaResult.resetAt,
+    }));
+    return;
+  }
+
+  // Route request to appropriate MCP server
+  try {
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+    const result = await router.route(url.pathname, body ? JSON.parse(body) : null, {
+      tenantId,
+      headers: req.headers as Record<string, string>,
+    });
+
+    // Track usage
+    await quotaManager.trackUsage(tenantId, 1);
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+  } catch (error) {
+    console.error('Routing error:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: 'internal_error',
+      message: (error as Error).message,
+    }));
+  }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('Shutting down gateway...');
+  await router.shutdown();
+  server.close(() => {
+    console.log('Gateway shut down');
+    process.exit(0);
+  });
+});
+
+// Start server
+server.listen(PORT, () => {
+  console.log(`🚀 {{projectName}} MCP Gateway running on port ${PORT}`);
+  console.log(`   Health: http://localhost:${PORT}/health`);
+  console.log(`   Status: http://localhost:${PORT}/status`);
+});

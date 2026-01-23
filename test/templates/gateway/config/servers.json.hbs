@@ -1,0 +1,24 @@
+{
+  "servers": [
+    {
+      "name": "primary",
+      "url": "http://localhost:3001",
+      "healthEndpoint": "/health",
+      "weight": 2,
+      "enabled": true,
+      "tools": ["*"],
+      "timeout": 30000
+    },
+    {
+      "name": "secondary",
+      "url": "http://localhost:3002",
+      "healthEndpoint": "/health",
+      "weight": 1,
+      "enabled": true,
+      "tools": ["*"],
+      "timeout": 30000
+    }
+  ],
+  "defaultTimeout": 30000,
+  "loadBalancing": "weighted"
+}
